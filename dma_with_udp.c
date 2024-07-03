@@ -18,16 +18,24 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <linux/ioctl.h>
 #include <sys/ioctl.h>
 #include <linux/i2c-dev.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <stdbool.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <netinet/in.h>
 
 #include <stdint.h>
 #include "rp.h"
 #include <arpa/inet.h>
+#include <pthread.h>
+#include <syslog.h>
+#include <time.h>
 
 // ***************************************************** //
 // ********* Static Global Variable Declaration ******** //
@@ -49,13 +57,12 @@
 #define ADC_SAMPLE_TIME                 8               // [ns]
 #define ADC_SAMPLE_TIME_NS              (uint32_t)( ADC_SAMPLE_DECIMATION * ADC_SAMPLE_TIME )   // [ns] --> 8*64=512 ns / sample
 #define ADC_START_DELAY_US              (uint32_t)( 0.30 * 2 * 1e6 / V_SONIC_WAVE )     // [µs] --> 2 * 0,30 m / 343,2 m/s = 1.748 µs
-// #define ADC_BUFFER_DELAY_US             (uint32_t)(( ADC_BUFFER_SIZE * ADC_SAMPLE_TIME_NS ) / (1e3))    // [µs] --> (16.384 * 512 ns ) / 1000 = 8.388 µs
-// #define ADC_MID_US                      (ADC_START_DELAY_US + ( ADC_BUFFER_DELAY_US / 2 ))
+
 
 
 //Define the whole data size to capture through the SONAR sensor and the sending data size through UDP
-#define DATA_SIZE                       60000
-#define READ_DATA_SIZE                  20000
+#define DATA_SIZE                       75000
+#define READ_DATA_SIZE                  25000
 
 //Initiate all the Redpitaya board led state (from LED 7-9 is used by system)
 #define LEDx_INIT()                     rp_DpinSetDirection( RP_LED0, RP_OUT ), \
@@ -90,10 +97,8 @@
 #define LED6_ON                         rp_DpinSetState( RP_LED4, RP_HIGH )
 
 //Define the IP address of the connected PC and the port to send data through UDP
-#define UDP_IP                          "192.168.128.17"    // This is the connecting pc ip address by default DHCP
 #define UDP_PORT                        61231               // This is the connecting UDP port of the PC
-
-
+#define SW_VERSION                      2.00
 
 // ***************************************************** //
 // ************ Enumerator Type Definations ************ //
@@ -114,40 +119,59 @@ struct iic_s
 /* Typedefs for data structs: Header and data */
 typedef struct
 {
-	int16_t HeaderLength;
-	int16_t SampleFrequency;
-	int16_t ADCResolution;
-	int16_t p_data[DATA_SIZE];
+	float HeaderLength;
+    float DataLength;
+    float TotalDataBlocks;
+	float DataBlockNumber;
+	float SampleFrequency;
+	uint16_t p_data[READ_DATA_SIZE];
 }Header_t;
 
-/* Typedefs for data structs: Header and data */
+/* Typedefs for data structure: Header and data */
 typedef struct
 {
 	int         socket;
-	socklen_t   length;
+	socklen_t   addr_length;
 	char        command;
-    struct      sockaddr_in serveraddr;
+    struct      sockaddr_in server_addr, client_addr;
+    int32_t     parameter[2];
 }udp_t;
 
+/* Typedefs for run variable: either send only the header or send the data */
+typedef enum
+{
+	RUN_NONE,
+	RUN_ADC
+}run_t;
 
+// ***************************************************** //
+// ************ Static Variable Declarations *********** //
+// ***************************************************** //
+static udp_t                udp={-1, -1};
+static Header_t             Header_with_data;
+static run_t	            run;
+static volatile bool		run_thread = true;
+pthread_mutex_t				run_meas_mutex;
+FILE                        *log_file;
 
 // ***************************************************** //
 // *************** Function Declarations *************** //
 // ***************************************************** //
-static udp_t    udp;
+void        initiate_redpitaya_with_dma();
+void        initiate_udp_connection();
+void        initiate_iic();
+void        acquire_data();
+void        read_data(int16_t *data, int block_number);
+void        release_resources();
+static void parse_udp_message( char *msg_rx );
+void        send_binary( uint8_t *data_in, uint16_t count );
+void        iic_set_run( run_t run_in, bool param );
+void        log_activities(char *message, int line);
+void        re_initiate_dma_channel();
+void        close_dma_channel();
 
-
-
-// ***************************************************** //
-// *************** Function Declarations *************** //
-// ***************************************************** //
-void initiate_redpitaya_with_dma();
-void initiate_iic();
-void initiate_udp_connection();
-void acquire_data();
-void read_and_send_data();
-void release_resources();
-
+void        *Server_thread();
+void        *Measure_thread();
 
 
 // ***************************************************** //
@@ -155,19 +179,213 @@ void release_resources();
 // ***************************************************** //
 int main(int argc, char **argv)
 {
-    initiate_redpitaya_with_dma();
-    initiate_udp_connection();
-    initiate_iic();
-    acquire_data();
-    read_and_send_data();
-    release_resources();
-    return 0;
+    //start logging into a file
+    log_file = fopen("log.txt", "a");
+    if (log_file == NULL){
+        fprintf(stderr, "Error opening log file\n");
+    }
+
+    pthread_t t_ServerThread, t_MeasureThread;
+    void *th_status;
+    // kill the parent-process
+    // and fork the current execution to force a new PID and
+    // start as a daemon
+    daemon(0, 0);
+
+    // start the udp server task in background!
+
+    // init all mutexes which are needed to block while dealing the run_t variable type (run)
+    pthread_mutex_init( &run_meas_mutex, NULL );
+
+
+    // create and start the threads
+    if( pthread_create( &t_ServerThread,	NULL,  Server_thread,	NULL ) !=0 ){
+        log_activities("Problem occured creating Server Thread",__LINE__);
+        return 1;
+    }
+    if( pthread_create( &t_MeasureThread,	NULL,  Measure_thread,	NULL ) !=0 ){
+        log_activities("Problem occured creating Measure Thread",__LINE__);
+        return 2;
+    }
+
+
+    // wait for two threads to terminate
+    // go into blocked mode
+    pthread_join( t_ServerThread,	&th_status );
+    pthread_join( t_MeasureThread,	&th_status );
+
+
+    // end main as last thread!
+    pthread_mutex_destroy(&run_meas_mutex);
+    fclose(log_file);
+    pthread_exit(0);
+    return( EXIT_SUCCESS );    
 }
 
 
 // ***************************************************** //
+// *********** Thread Function Declarations ************ //
+// ***************************************************** //
+
+/*
+*	@brief		Thread waits for UDP message(s) in blocked mode
+*				and parses the received message(s) and value(s).
+*	@name		ServerThread
+*/
+void *Server_thread()
+{
+	char rx_buffer[40];
+
+    //Initiate the udp server connection
+    initiate_udp_connection();
+	
+	while( 1 ){
+		memset( (void *)rx_buffer, (int)0, (size_t)(strlen( rx_buffer )) );
+
+		// Go into blocked mode to free CPU; wait for UDP message
+		if( recvfrom(udp.socket, rx_buffer, sizeof(rx_buffer), 0, (struct sockaddr *)&udp.client_addr, &udp.addr_length) < 0 ){
+            log_activities("Recieving Message was not successfull.", __LINE__);
+			break;
+		}
+		
+        // Lock the mutex before changing the run
+        pthread_mutex_lock(&run_meas_mutex);
+		parse_udp_message( rx_buffer );
+        pthread_mutex_unlock(&run_meas_mutex); 
+	}
+	
+	close( udp.socket );
+	pthread_exit(NULL);
+}
+
+
+
+
+/*
+*	@brief		Thread waits for signal from ServerThread in blocked mode
+*				and processes the udp.command(s). 
+*	@name		MeasureThread
+*/
+void *Measure_thread()
+{
+	// variables for measurement
+    uint16_t *pData = ( uint16_t *)&(Header_with_data.p_data);
+	
+	
+	initiate_redpitaya_with_dma();
+    log_activities("Redpitaya Initiated", __LINE__);
+	
+	// init all LEDs (LED0 - LED3)
+	LEDx_INIT();
+		
+	// initiate the iic sensor
+	initiate_iic();
+		
+	
+    //Here the number of chunks are calculated
+	Header_with_data.SampleFrequency	= (float)(ADC_SAMPLE_FREQUENCY);
+    int Total_data_blocks_number        = (DATA_SIZE / READ_DATA_SIZE);
+    if ((DATA_SIZE % READ_DATA_SIZE) != 0){
+        Total_data_blocks_number += 1;
+    }
+	Header_with_data.TotalDataBlocks    = (float)(Total_data_blocks_number);
+	
+	// While loop - stay here while in "normal" operation
+	while( 1 )
+	{
+		( run != RUN_NONE )?( LED0_ON ):( LED0_OFF );
+		
+		// increment a counter; this is the time-base for all messurements and outputs [ms]
+		// counter_ms = (counter_ms + THREAD_PAUSE_MS) % 1500;
+		
+		
+		re_initiate_dma_channel();
+
+		acquire_data();
+		// retval = measure_distance( &distance );
+        log_activities("Data Acquired", __LINE__);
+		
+        
+		
+		// the "run" variable is (re-)set by the ServerThread via UDP
+		switch(run)
+		{
+			case RUN_NONE:
+                Header_with_data.HeaderLength = (float)(sizeof(Header_with_data) - sizeof(Header_with_data.p_data));
+                Header_with_data.DataLength = (uint16_t)(sizeof(Header_with_data.p_data));
+                send_binary( (uint8_t *)&Header_with_data, (uint16_t)(Header_with_data.HeaderLength) );
+				break;
+			case RUN_ADC:
+                //The logic is select the chunk of data and send it, then select the next chunk
+                for (int block_number = 0; block_number < Total_data_blocks_number; block_number++){
+                    Header_with_data.DataBlockNumber = (float) block_number;
+                    read_data((int16_t *)pData, block_number);
+                    Header_with_data.HeaderLength = (float)(sizeof(Header_with_data) - sizeof(Header_with_data.p_data));
+                    Header_with_data.DataLength = (uint16_t)(sizeof(Header_with_data.p_data));
+                    memcpy( (uint16_t *)Header_with_data.p_data, pData, READ_DATA_SIZE * sizeof(uint16_t));
+			        send_binary( (uint8_t *)&Header_with_data, (uint16_t)(Header_with_data.HeaderLength + Header_with_data.DataLength) );
+                    usleep(1000);
+                }
+			    // send_binary( (uint8_t *)&Header_with_data, (uint16_t)(Header_with_data.HeaderLength) );
+                pthread_mutex_lock(&run_meas_mutex);
+                run = RUN_NONE;
+                pthread_mutex_unlock(&run_meas_mutex);
+                log_activities("Data Sent Successfully", __LINE__);
+				// send_data = true;
+				break;
+                
+			default:
+				run = RUN_NONE;
+				break;
+		}
+        close_dma_channel();
+	} // end while(1)
+
+    release_resources();
+	pthread_exit(NULL);
+}
+
+// ***************************************************** //
 // *************** Function Declarations *************** //
 // ***************************************************** //
+
+/*
+*@brief     This is the function to initiate UDP connection 
+*
+*@details   This function initiates redpitaya's UDP
+*           connection with necessary steps for socket 
+*           binding
+*
+*
+*/
+void initiate_udp_connection(){
+
+    // First need to initiate Port and Address, family type
+    udp.server_addr.sin_family = AF_INET;
+    udp.server_addr.sin_port = htons( UDP_PORT );
+    udp.server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    // Save the client address length so that later on the process 
+    // we don't have mismatch with a new connection
+    udp.addr_length = sizeof(udp.client_addr);
+
+    //Create a socket with UDP protocol
+    udp.socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+
+    // Check the socket is active or not
+    if(udp.socket < 0){
+        log_activities("Socket not active / properly connected", __LINE__);
+    }else{
+        log_activities("Socket activated properly", __LINE__);
+    }
+
+    if(bind(udp.socket, (struct sockaddr *)&udp.server_addr, sizeof(udp.server_addr)) < 0){
+        log_activities( "Socket binding failed for UDP port ", __LINE__);
+    }else{
+        log_activities("Socket binding successful for UDP port.", __LINE__);
+    }
+}
+
 
 /*
 *@brief     This is the function to initiate redpitaya
@@ -182,7 +400,7 @@ int main(int argc, char **argv)
 void initiate_redpitaya_with_dma(){
     /* Initialise Red Pitaya */
     if (rp_InitReset(false) != RP_OK) {
-        fprintf(stderr, "Rp api init failed!\n");
+        log_activities("Rp api init failed!", __LINE__);
         return -1;
     }
 
@@ -198,13 +416,13 @@ void initiate_redpitaya_with_dma(){
 
     /* Set decimation for both channels */
     if (rp_AcqAxiSetDecimationFactor(DECIMATION_FACTOR) != RP_OK) {
-        fprintf(stderr, "rp_AcqAxiSetDecimationFactor failed!\n");
+        log_activities("rp_AcqAxiSetDecimationFactor failed", __LINE__);
         return -1;
     }
 
     /* Set trigger delay for channel */
     if (rp_AcqAxiSetTriggerDelay(RP_CH_1, DATA_SIZE)  != RP_OK) {
-       fprintf(stderr, "rp_AcqAxiSetTriggerDelay RP_CH_1 failed!\n");
+       log_activities("rp_AcqAxiSetTriggerDelay RP_CH_1 failed", __LINE__);
        return -1;
     }
 
@@ -212,19 +430,51 @@ void initiate_redpitaya_with_dma(){
     Set-up the Channel 1 buffers to each work with half the available memory space.
     */
     if (rp_AcqAxiSetBufferSamples(RP_CH_1, g_adc_axi_start, DATA_SIZE) != RP_OK) {
-        fprintf(stderr, "rp_AcqAxiSetBuffer RP_CH_1 failed!\n");
+        log_activities("rp_AcqAxiSetBuffer RP_CH_1 failed", __LINE__);
         return -1;
     }
 
     /* Enable DMA on channel 1 */
     if (rp_AcqAxiEnable(RP_CH_1, true)) {
-        fprintf(stderr, "rp_AcqAxiEnable RP_CH_1 failed!\n");
+        log_activities("rp_AcqAxiEnable RP_CH_1 failed", __LINE__);
         return -1;
     }
     printf("Enable CHA 1\n");
 
     /* Specify the acquisition trigger level*/
     rp_AcqSetTriggerLevel(RP_T_CH_1, 0);
+}
+
+
+/*
+*@brief     This is the function to re initiate DMA channel 
+*           to avoid residual values in the ADC signal 
+*
+*@details   This function re initiates DMA channel everytime before acquiring signal 
+*           otherwise residual value shifts the new signal after some time
+*
+*
+*/
+void re_initiate_dma_channel(){
+    /* Enable DMA on channel 1 */
+    if (rp_AcqAxiEnable(RP_CH_1, true)) {
+        log_activities("rp_AcqAxiEnable RP_CH_1 failed", __LINE__);
+        return -1;
+    }
+    printf("Enable CHA 1\n");
+}
+
+/*
+*@brief     This is the function closes the DMA channel 
+*            
+*
+*@details   This function closes DMA channel everytime before acquiring signal 
+*           otherwise residual value shifts the new signal after some time
+*
+*
+*/
+void close_dma_channel(){
+    rp_AcqAxiEnable(RP_CH_1, false);
 }
 
 
@@ -251,30 +501,19 @@ void initiate_iic(){
 
 
 /*
-*@brief     This is the function to initiate UDP connection 
+*@brief     This is the function to send sensor data via udp connection
 *
-*@details   This function initiates redpitaya's UDP
-*           connection with necessary steps for socket 
-*           binding
+*@details   This function only sends the data
 *
 *
 */
-void initiate_udp_connection(){
-
-    memset(&udp.serveraddr, 0, sizeof(udp.serveraddr));
-    /* Set up the UDP port with address */ 
-    udp.socket = socket(AF_INET, SOCK_DGRAM, 0);
-    if (udp.socket == -1) {
-        perror("Error creating UDP socket");
-        exit(EXIT_FAILURE);
-    }
-
-    udp.length = sizeof(udp.serveraddr);
-
-    udp.serveraddr.sin_family = AF_INET;
-    udp.serveraddr.sin_port = htons(UDP_PORT);
-    inet_pton(AF_INET, UDP_IP, &udp.serveraddr.sin_addr);
-
+void send_binary( uint8_t*data_in, uint16_t count )
+{
+	//uint16_t Sent;
+	if( udp.socket >= 0 ){
+		sendto( udp.socket, (uint8_t *)data_in, count, MSG_DONTWAIT,  (struct sockaddr *) &udp.client_addr, udp.addr_length);
+        log_activities("Message sent successfully", __LINE__);
+	}
 }
 
 /*
@@ -298,7 +537,7 @@ void acquire_data(){
 
     /* Start the acquisition */
     if (rp_AcqStart() != RP_OK) {
-        fprintf(stderr, "rp_AcqStart failed!\n");
+        log_activities("rp_AcqStart failed", __LINE__);
         return -1;
     }
     printf("ACQ Started\n");
@@ -320,7 +559,7 @@ void acquire_data(){
     bool fillState = false;
     while (!fillState) {
         if (rp_AcqAxiGetBufferFillState(RP_CH_1, &fillState) != RP_OK) {
-            fprintf(stderr, "rp_AcqAxiGetBufferFillState RP_CH_1 failed!\n");
+            log_activities("rp_AcqAxiGetBufferFillState RP_CH_1 failed", __LINE__);
             return -1;
         }
     }
@@ -333,46 +572,24 @@ void acquire_data(){
 
 /*
 *@brief     This is the function to read acquired data 
-*           and send through the udp connection
+*         
 *               
 *@details   This function reads the data from the memory
-*           and sends in a bluk to PC
+*           It also selects which chunk should be sent
 *
 */
-void read_and_send_data(int udp_socket){
+void read_data(int16_t *data, int block_number){
     /* Get write pointer on the triggering location */
     uint32_t posChA;
     rp_AcqAxiGetWritePointerAtTrig(RP_CH_1, &posChA);
 
-    /* Allocate memory for the data */
-    int16_t *buff1 = (int16_t *)malloc(READ_DATA_SIZE * sizeof(int16_t));
+    uint32_t read_size = (uint32_t) (block_number * READ_DATA_SIZE);
+    posChA = read_size;
 
-    int read_size = 0;
+    uint32_t size1 = READ_DATA_SIZE;
 
-    /* Writing data into a text file */
-    //FILE *fp = fopen ("out.txt", "w");
-
-    int line = 1;
-    while (read_size < DATA_SIZE){
-        uint32_t size1 = READ_DATA_SIZE;
-
-        rp_AcqAxiGetDataRaw(RP_CH_1, posChA, &size1, buff1);
-
-        for (int i = 0; i < READ_DATA_SIZE; i++) {
-            //fprintf(fp,"%d:  %d\n",line++, buff1[i]);
-            sendto(udp.socket, &buff1[i], sizeof(buff1[i]), 0,
-                   (struct sockaddr*)&udp.serveraddr, sizeof(udp.serveraddr));
-            
-        }
+    rp_AcqAxiGetDataRaw(RP_CH_1, posChA, &size1, data);
 	
-        posChA += size1;
-        read_size += READ_DATA_SIZE;
-        //printf("Saved data size %d\n", read_size);
-	    printf("Sent chunk %d to %s:%d\n", read_size, UDP_IP, UDP_PORT);
-        usleep(100000);
-    }
-    free(buff1);
-    // fclose(fp);
 }
 
 
@@ -390,9 +607,66 @@ void release_resources(){
     /* Releasing resources */
     rp_AcqAxiEnable(RP_CH_1, false);
     //Close the udp_socket
-    close(udp.socket);
+    // close(udp.socket);
 
     rp_Release();
+    //pthread_exit(NULL);
 
     //fclose(fp);
+}
+
+
+/*
+*	@brief		This reads the message and sets the run variable
+*				as ADC data taking or Demo to send only the Header Data Length.
+*	@name		parse_udp_message
+*/
+static void parse_udp_message( char *msg_rx )
+{
+	char *rx_param;
+	
+	if( msg_rx[0] == '-' ){
+		
+		udp.command = msg_rx[1];
+		if( (rx_param = strstr( msg_rx, " ")) != NULL ){
+			udp.parameter[0] = atoi( rx_param++ );
+			if( (rx_param = strstr( rx_param, " ")) != NULL ){
+				udp.parameter[1] = atoi( rx_param++ );
+			}
+		}
+		
+		switch( udp.command )
+		{
+			case 'a':
+				run = RUN_ADC;
+				break;
+            case 'i':
+                run = RUN_NONE;
+                break;
+			default:
+                break;
+		}
+	}
+	
+}
+
+
+/*
+*@brief     This is the function to log activities
+*               
+*@details   This function releases the redpitaya channel,
+*           closes the udp socket, frees the memory and
+*           release redpitaya initiation
+*@name      log_activities
+*
+*/
+void log_activities(char *message, int line){
+
+    //Get the current time
+    time_t t;
+    time(&t);
+
+    if (fprintf(log_file, "%s:(Line: %d) %s.\n", ctime(&t), line, message) < 0){
+        fprintf(stderr, "Error writing to log file\n");
+    };
 }
