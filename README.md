@@ -23,3 +23,5 @@ After that please remember almost first 5500 data points the sending pulse is pr
 
 Now to save the data put the saving folder's absolute path and number of signals. A csv file mentioning the number of signals will be created automatically.
 
+# Link for downloading the client app of PC to recieve data in the Lab 
+https://drive.google.com/file/d/18GEMakYt0-ehvhDb209Q9ekfypzQgB09/view
