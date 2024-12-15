@@ -23,5 +23,17 @@ After that please remember almost first 5500 data points the sending pulse is pr
 
 Now to save the data put the saving folder's absolute path and number of signals. A csv file mentioning the number of signals will be created automatically.
 
+# Important Changing Points for Redpitaya DMA C Program
+
+Change the DATA_SIZE in the below part to multiplications of 25k. Optimal reading and sending size in one chunk is around 27k over TCP and a little bit higher in UDP but 25k is the best option.  
+```
+#define DATA_SIZE                       25000
+#define READ_DATA_SIZE                  25000
+```
+
 # Link for downloading the client app of PC to recieve data in the Lab 
-https://drive.google.com/file/d/18GEMakYt0-ehvhDb209Q9ekfypzQgB09/view
+https://drive.google.com/drive/folders/1wcdygnxtqzJEOLsDCntOaaj_m0lCJwOc?usp=sharing
+There are three files. 
+applab2: This handles the AP30 Redpitaya (you can check the sticker back of the Redpitaya Embedded System). So people who requires to take 75k data points use this one. 
+applab3: This handles the AP10 Redpitaya (you can check the sticker back of the Redpitaya Embedded System). So people who requires to take 50k data points use this one. 
+applab4: This handles the Unknown Redpitaya (you can check there is no sticker back of the Redpitaya Embedded System). So people who requires to take 25k data points use this one. 
