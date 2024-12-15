@@ -31,9 +31,24 @@ Change the DATA_SIZE in the below part to multiplications of 25k. Optimal readin
 #define READ_DATA_SIZE                  25000
 ```
 
+If You need to turn on logging uncomment the below part (The other part is how to put a new logging point), log.txt will be the file holding the logs:
+```
+// #define LOG_ACTIVITIES                  1                   // This value is 1 while debugging on points and logging otherwise put into comment
+
+#ifdef LOG_ACTIVITIES == 1
+  log_activities("rp_AcqStart failed", __LINE__);
+#endif
+}
+```
+
+
 # Link for downloading the client app of PC to recieve data in the Lab 
 https://drive.google.com/drive/folders/1wcdygnxtqzJEOLsDCntOaaj_m0lCJwOc?usp=sharing
 There are three files. 
-applab2: This handles the AP30 Redpitaya (you can check the sticker back of the Redpitaya Embedded System). So people who requires to take 75k data points use this one. 
-applab3: This handles the AP10 Redpitaya (you can check the sticker back of the Redpitaya Embedded System). So people who requires to take 50k data points use this one. 
-applab4: This handles the Unknown Redpitaya (you can check there is no sticker back of the Redpitaya Embedded System). So people who requires to take 25k data points use this one. 
+- applab2: This handles the AP30 Redpitaya (you can check the sticker back of the Redpitaya Embedded System). So people who requires to take 75k data points use this one. 
+- applab3: This handles the AP10 Redpitaya (you can check the sticker back of the Redpitaya Embedded System). So people who requires to take 50k data points use this one. 
+- applab4: This handles the Unknown Redpitaya (you can check there is no sticker back of the Redpitaya Embedded System). So people who requires to take 25k data points use this one.
+
+# Questions or Suggestions
+Reach me through my Email: mashnunul.huq@hotmail.com
+or By whatsapp.
