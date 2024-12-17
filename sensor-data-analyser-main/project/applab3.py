@@ -11,24 +11,37 @@ import paramiko
 
 
 class RedPitayaSensor:
+    """
+    This is the class for communicating with the C program of Redpitaya
+
+    Attributes:
+        no attributes to initiate 
+    """
     def __init__(self):
         self.size_of_raw_adc = 25000
         self.buffer_size = (self.size_of_raw_adc + 6) * 4 
         self.msg_from_client = "-i 1"
-        self.hostIP = "169.254.196.173"
-        self.data_port = 61231
-        self.ssh_port = 22
+        self.hostIP = "169.254.253.217" #this is the default IP address of redpitaya ethernet connection 
+        self.data_port = 61231 #this data port is set
+        self.ssh_port = 22 #this port is for commanding via ssh using paramiko
         self.server_address_port = (self.hostIP, self.data_port)
         # Create a UDP socket at client side
         self.sensor_status_message = "Waiting to Connect with RedPitaya UDP Server!"
         print(self.sensor_status_message)
         self.udp_client_socket = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
+        self.header_length = None
+        #Below is the paramiko ssh setting
         self.client = paramiko.SSHClient()
         self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        self.header_length = None
         
         
     def give_ssh_command(self, command):
+        """
+        Method for executing command through ssh on Redpitaya
+
+        Attributes:
+            command(string): full command to be executed 
+        """
         try:
             # Connect to the Redpitaya device
             self.client.connect(self.hostIP, self.ssh_port, "root", "root")
@@ -57,18 +70,43 @@ class RedPitayaSensor:
         
         
     def set_sensor_message(self, message):
+        """
+        Method for setting message for the C program on Redpitaya
+
+        Attributes:
+            message(string): currently messages can be '-a 1' or '-i 1', a for ADC data i for header-info 
+        """
         self.msg_from_client = message
         
     def get_sensor_status_message(self):
+        """
+        Method for getting message from the C program on Redpitaya
+
+        Attributes:
+            no attribute 
+        """
         return self.sensor_status_message    
 
     def send_msg_to_server(self):
+        """
+        Method for sending message to the C program on Redpitaya
+
+        Attributes:
+            no attribute 
+        """
         bytes_to_send = str.encode(self.msg_from_client)
         print("Sending message")
         self.udp_client_socket.sendto(bytes_to_send, self.server_address_port)
         
     def get_data_info_from_server(self):
-        self.msg_from_client = "-i 1"
+        """
+        Method for getting Header data from the C program on Redpitaya
+        Currently not saving in csv file.
+
+        Attributes:
+            no attribute 
+        """
+        self.msg_from_client = "-i 1" #this message is for the header info which is not saved if required save to the csv file
         self.send_msg_to_server()
         packet = self.udp_client_socket.recv(self.buffer_size)
         self.sensor_status_message = f"Sensor Connected Successfully at {self.server_address_port}!"
@@ -81,12 +119,19 @@ class RedPitayaSensor:
         for i in struct.iter_unpack('@f', packet[:self.header_length]):
             header_data.append(i[0])
         print(f"Length of Header : {len(header_data)}")
+        #below is for time sync checking
         self.local_time_sync = time.time() * 1000  # in milliseconds
         self.first_synced_time = synced_time
         return synced_time, header_data
  
         
-    def get_data_from_server(self, start_time):   
+    def get_data_from_server(self, start_time):
+        """
+        Method for getting ADC data from the C program on Redpitaya
+
+        Attributes:
+            start_time(time): time synchronization to dump broken signals in UDP 
+        """   
         ultrasonic_data = []
         for i in range(self.total_data_blocks):
             time.sleep(1/1000)
@@ -122,13 +167,23 @@ class RedPitayaSensor:
 
 
 class Worker(QRunnable):
-    '''
-    Worker thread
-    '''
+    """
+    Class for Worker Thread
+
+        Attributes:
+            no attribute 
+    """
     def __init__(self, func_is_button_checked, rp_sensor, *args, **kwargs) -> None:
+        """
+        Constructor for actual data recieving thread from the C program on Redpitaya
+
+        Attributes:
+            func_is_button_checked (bool): real time check box status 
+            rp_sensor (RedpitayaSensorObj): RedpitayaSensor class object 
+        """
         super().__init__()
         # self.realtime_checked = realtime_checked
-        self.func_is_button_checked = func_is_button_checked
+        self.func_is_button_checked = func_is_button_checked #till realtime check-box is not checked it will not take data
         self.rp_sensor = rp_sensor
         self.dataFilePath = None
         self.saving_number_of_signals = None
@@ -142,6 +197,12 @@ class Worker(QRunnable):
 
     @pyqtSlot()
     def run(self):
+        """
+        Main runnable method for actual data recieving thread from the C program on Redpitaya
+
+        Attributes:
+            no attribute 
+        """
         print("Start of thread")
         while self.func_is_button_checked(*self.args, **self.kwargs) and self.is_running:
             # self.fn(*self.args, **self.kwargs)
@@ -183,6 +244,12 @@ class Worker(QRunnable):
     
     
     def save_data(self, data):
+        """
+        Method for saving recieved data into csv file
+
+        Attributes:
+            data (numpy): actual data to be saved   
+        """
         df = pd.DataFrame(data)
         print("Before transposing data shape", df.shape)
         df = df.set_index('raw_adc').transpose()
@@ -194,13 +261,32 @@ class Worker(QRunnable):
         print(f"Data saved to {file_path}")
         
     def set_saving_number_of_signals(self, saving_number_of_signals):
+        """
+        Method for setting number of saving data
+
+        Attributes:
+            saving_number_of_signals (int): Give the numbers of data to be saved in current shot
+                                            and also file name setting with number
+        """
         self.saving_number_of_signals = saving_number_of_signals
         
     def set_dataFilePath(self, dataFilePath):
+        """
+        Method for setting recieved data saving file name
+
+        Attributes:
+            dataFilePath (string): Absolute data file path  
+        """
         self.dataFilePath = dataFilePath
         
     
     def stop(self):
+        """
+        Method for destroying smoothly
+
+        Attributes:
+            dataFilePath (string): Absolute data file path  
+        """
         self.is_running = False
 
 class WorkerSignals(QObject):
@@ -208,11 +294,14 @@ class WorkerSignals(QObject):
     Defines the signals available from a running worker thread.
 
     Supported Signals are : 
-
-    result
-        data returned from rp sensor to plot on GUI
+        result: recieved numpy data for plotting live
+        error: any error occured
+        finished: for giving hints that current numbers of signal has been reached
+        progress = status of connection and data recieving state
+        saved_signals_count_updated: number of already saved signals 
+        broken_signals_count_updated: number of broken signals recieved
+        total_signals_count_updated: number of total signals including broken ones
     '''
-
     result = pyqtSignal(object)
     error = pyqtSignal(tuple)
     finished = pyqtSignal()
@@ -223,7 +312,21 @@ class WorkerSignals(QObject):
 
 
 class MainWindow(QMainWindow):
+    """
+    Class for Main Program to attach all threads and GUI
+
+    Attributes:
+        no attributes required
+
+    """
     def __init__(self):
+        """
+        Constructor of Main function of the program
+        All initiation of GUI and classes are present here
+
+        Attributes:
+            no attributes required
+        """
         super().__init__()
         self.rp_sensor = RedPitayaSensor()
         self.start_time = None
@@ -232,23 +335,23 @@ class MainWindow(QMainWindow):
         self.sensor_status_message = self.rp_sensor.get_sensor_status_message()
         self.app_status_message = "App Started"
         
-        self.button_is_checked = True
-        self.realtime_chkbox_checked = False
+        self.button_is_checked = True #this is something else button for plotting area
+        self.realtime_chkbox_checked = False #this is the checkbox to start the main algorithm
         self.show_region_to_select = False
         self.raw_adc_data = None
         self.previous_range_selector_region = (100, 1000)
 
         self.setWindowTitle("Sensor Data Analyser")
 
-        self.plot_widget = pg.PlotWidget()
+        self.plot_widget = pg.PlotWidget() #live graph plotting area
         
         
-        main_layout = QGridLayout()
+        main_layout = QGridLayout() #main layout where all child GUI components has to be registered
         main_layout.addWidget(self.plot_widget, 0, 0)
         
 
-        # for button
-        self.button = QPushButton("Press Me!")
+        # for button make sure you attach a correct function with every buttons
+        self.button = QPushButton("Press Me!") #this button is for the plotting area not visible
         self.button.setCheckable(True)
         self.button.clicked.connect(self.the_button_was_toggled)
         self.button.setChecked(self.button_is_checked)
@@ -264,7 +367,7 @@ class MainWindow(QMainWindow):
         self.show_region_chkbox = QCheckBox("Region-Select")
         self.controls_mid_layout.addWidget(self.show_region_chkbox)
 
-        self.confirm_region_btn = QPushButton("Confirm")
+        self.confirm_region_btn = QPushButton("Confirm") #this is for taking a window for FFT calculation
         self.controls_mid_layout.addWidget(self.confirm_region_btn)
 
         main_layout.addLayout(self.controls_mid_layout, 1, 0)
@@ -362,6 +465,12 @@ class MainWindow(QMainWindow):
 
 
     def show_region_handler(self,state):
+        """
+        Method of region selection for FFT calculation
+
+        Attributes:
+            state (bool): PyQT6 program state for real_time checkbox status running and true
+        """
         self.server_message_widget.setText(self.rp_sensor.get_sensor_status_message())
         if state == Qt.CheckState.Checked.value:
             print("Region select checked !")
@@ -402,6 +511,12 @@ class MainWindow(QMainWindow):
         self.plot_adc_data()
 
     def plot_adc_data(self, data=None):
+        """
+        Method for plotting the recieved data live
+
+        Attributes:
+            data (numpy): recived data, if none then nothing will be plotted
+        """
         print(self.rp_sensor.get_sensor_status_message(), "------------------------------")
         self.server_message_widget.setText(self.rp_sensor.get_sensor_status_message())
         self.plot_widget.clear()
@@ -423,7 +538,13 @@ class MainWindow(QMainWindow):
 
 
     def realtime_checkbox_handler(self, state):
-        
+        """
+        Method for realtime_checkbox work
+        This is the base of all type of activity of data receiving 
+
+        Attributes:
+            state (bool): PyQT6 program state for real_time checkbox status running and true
+        """
         if state == Qt.CheckState.Checked.value:
             self.realtime_chkbox_checked = True
             print("Go Realtime!")
@@ -447,20 +568,51 @@ class MainWindow(QMainWindow):
             
             
     def app_status_message_set(self, text):
+        """
+        Method for setting application's current status
+
+        Attributes:
+            text (string): message to be showed in the GUI
+        """
         self.app_status_message = text
         
     def app_status_message_get(self):
+        """
+        Method for getting application's current status
+
+        Attributes:
+            no attribute required
+        """
         return self.app_status_message
     
     def broken_signal_status_message_set(self, count):
+        """
+        Method for showing numbers of broken signals
+
+        Attributes:
+            count (int): current total number of broken signals 
+        """
         self.broken_signal_count_message_widget.setText(f"Broken Signals: {count}")
     
     
     def total_signal_status_message_set(self, count):
+        """
+        Method for showing numbers of signals received
+
+        Attributes:
+            count (int): current total number of signals received
+        """
         self.total_signal_count_message_widget.setText(f"Total Signals Received: {count}")
         
     
     def save_data_btn_handler(self):
+        """
+        Method for saving button to set file path number of signals
+        (Put some try catch erros)
+
+        Attributes:
+            no attribute required 
+        """
         self.dataFilePath = self.file_path_line_edit.text()
         self.worker.set_dataFilePath(self.dataFilePath)
         
@@ -475,6 +627,12 @@ class MainWindow(QMainWindow):
         self.save_data_btn.setDisabled(True)
         
     def start_sensor_btn_handler(self):
+        """
+        Method for giving command to start the sensor C program of Redpitaya 
+
+        Attributes:
+            no attributes required 
+        """
         commands = ["cd /usr/RedPitaya/Examples/C", "./dma_with_udp_faster"]
         full_command = " && ".join(commands)
         self.rp_sensor.give_ssh_command(full_command)
@@ -483,12 +641,24 @@ class MainWindow(QMainWindow):
         time.sleep(1)
         
     def stop_sensor_btn_handler(self):
+        """
+        Method for giving command to stop the sensor C program of Redpitaya 
+
+        Attributes:
+            no attributes required 
+        """
         command = "pidof dma_with_udp_faster"
         pid = self.rp_sensor.give_ssh_command(command)
         command1 = f"kill {pid}"
         self.rp_sensor.give_ssh_command(command1)
         
     def update_save_button_state(self, count):
+        """
+        Method for updating save button state while desired number of signals are received or to be saved
+
+        Attributes:
+            count (int): current numbers of signals saved 
+        """
         # Enable the save button if saved_signals_count exceeds saving_number_of_signals
         self.save_data_btn.setDisabled(False)
         self.app_status_message_set(f"Successfully saved {self.saving_number_of_signals} data")
@@ -500,6 +670,12 @@ class MainWindow(QMainWindow):
         
 
     def closeEvent(self, event):
+        """
+        Method for destroying program smoothly 
+
+        Attributes:
+            event (PyQt6.event): currently running threads events
+        """
         if self.worker:
             self.worker.stop()
             self.threadpool.waitForDone()
@@ -509,6 +685,11 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == "__main__":
+    """
+    Function for Main Program and for command line arguments handling  
+    Attributes:
+        no attributes required 
+    """
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
