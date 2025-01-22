@@ -43,7 +43,7 @@ If You need to turn on logging uncomment the below part (The other part is how t
 
 
 # Link for downloading the client app of PC to recieve data in the Lab 
-https://drive.google.com/drive/folders/1wcdygnxtqzJEOLsDCntOaaj_m0lCJwOc?usp=sharing
+[https://drive.google.com/drive/folders/1wcdygnxtqzJEOLsDCntOaaj_m0lCJwOc?usp=sharing](https://drive.google.com/drive/folders/1XMiMW30eITwy5o7a4K11IW6ip89RFFfI?usp=sharing)
 There are three files. 
 - applab2: This handles the AP30 Redpitaya (you can check the sticker back of the Redpitaya Embedded System). So people who requires to take 75k data points use this one. 
 - applab3: This handles the AP10 Redpitaya (you can check the sticker back of the Redpitaya Embedded System). So people who requires to take 50k data points use this one. 
