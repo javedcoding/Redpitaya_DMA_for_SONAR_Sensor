@@ -13,9 +13,9 @@ import paramiko
 class RedPitayaSensor:
     def __init__(self):
         self.size_of_raw_adc = 25000
-        self.buffer_size = (self.size_of_raw_adc + 17) * 4 
+        self.buffer_size = (self.size_of_raw_adc + 6) * 4 
         self.msg_from_client = "-i 1"
-        self.hostIP = "169.254.253.217"
+        self.hostIP = "169.254.196.173"
         self.data_port = 61231
         self.ssh_port = 22
         self.server_address_port = (self.hostIP, self.data_port)
@@ -25,8 +25,6 @@ class RedPitayaSensor:
         self.udp_client_socket = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
         self.client = paramiko.SSHClient()
         self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        
-        #Below variables for Headers only
         self.header_length = None
         
         
@@ -76,9 +74,8 @@ class RedPitayaSensor:
         self.sensor_status_message = f"Sensor Connected Successfully at {self.server_address_port}!"
         print(self.sensor_status_message)
         print(f"Total Received : {len(packet)} Bytes.")
-        #For extracting Header Constant Values
-        self.header_length = int(struct.unpack('@f', packet[:4])[0]) #Extracting Header length
-        self.total_data_blocks = int(struct.unpack('@f', packet[56:60])[0]) #Extracting Total Data blocks per signal
+        self.header_length = int(struct.unpack('@f', packet[:4])[0])
+        self.total_data_blocks = int(struct.unpack('@f', packet[8:12])[0])
         synced_time = int(struct.unpack('@f', packet[20:24])[0])
         header_data = []
         for i in struct.iter_unpack('@f', packet[:self.header_length]):
@@ -91,47 +88,36 @@ class RedPitayaSensor:
         
     def get_data_from_server(self, start_time):   
         ultrasonic_data = []
-        header = []
-        
         for i in range(self.total_data_blocks):
             time.sleep(1/1000)
             self.msg_from_client = "-a 1"
             self.send_msg_to_server()
-            
-            packet1 = self.udp_client_socket.recv(self.buffer_size)
-            
             if(i == 0):
                 current_time = time.time() * 1000  # in milliseconds
                 elapsed_time = current_time - self.local_time_sync + start_time
                 #elapsed_time = current_time - self.local_time_sync + self.first_synced_time - start_time
-                header = [h[0] for h in struct.iter_unpack('@f', packet1[:self.header_length])]
-            current_data_block_number = int(struct.unpack('@f', packet1[60:64])[0])
-            #distance = int(struct.unpack('@f', packet1[40:44])[0])
-            #print(f"Distance: {distance}")
+            packet1 = self.udp_client_socket.recv(self.buffer_size)
+            current_data_block_number = int(struct.unpack('@f', packet1[12:16])[0])
             if(i != current_data_block_number):
                 print(f"Error:Expected block{i} but recieved block{current_data_block_number}")
                 break
             
-            redpitaya_acq_time_stamp = int(struct.unpack('@f', packet1[64:68])[0])
+            redpitaya_acq_time_stamp = int(struct.unpack('@f', packet1[20:24])[0])
             self.sensor_status_message = f"{current_data_block_number+1} numbered block Successfully received at {self.server_address_port} at {elapsed_time}ms of client and {redpitaya_acq_time_stamp}ms of redpitaya!"
-            #ultrasonic_data_length = int(struct.unpack('@f', packet1[4:8])[0])
-            
-                
+            ultrasonic_data_length = int(struct.unpack('@f', packet1[4:8])[0])
             for i in struct.iter_unpack('@h', packet1[self.header_length:]):
                 ultrasonic_data.append(i[0])
-                
-        
+
         #current_time = time.time() * 1000  # in milliseconds
         #elapsed_time = current_time - self.local_time_sync + start_time
         print(f"Length of Ultrasonic Data : {len(ultrasonic_data)}")
         
-        if (len(ultrasonic_data) != self.size_of_raw_adc * self.total_data_blocks):
+        if (len(ultrasonic_data) != 25000*self.total_data_blocks):
             return None
         
-        header_df = pd.DataFrame(header, columns=['header'])
-        raw_df = pd.DataFrame(ultrasonic_data, columns=['raw_adc'])
+        df = pd.DataFrame(ultrasonic_data, columns=['raw_adc'])
         
-        return header_df['header'], raw_df['raw_adc']
+        return df['raw_adc']
 
 
 
@@ -152,7 +138,7 @@ class Worker(QRunnable):
         self.is_running = True
         self.saved_signals_count = 0
         self.total_signals_count = 0
-        self.broken_signals_count = 0
+        self.broken_signala_count = 0
 
     @pyqtSlot()
     def run(self):
@@ -160,18 +146,18 @@ class Worker(QRunnable):
         while self.func_is_button_checked(*self.args, **self.kwargs) and self.is_running:
             # self.fn(*self.args, **self.kwargs)
             try:
-                header, data = self.rp_sensor.get_data_from_server(window.start_time)
+                result = self.rp_sensor.get_data_from_server(window.start_time)
                 self.total_signals_count += 1
                 self.signals.total_signals_count_updated.emit(self.total_signals_count)
-                if data is None or header is None:
+                if result is None:
                     print("No valid data recieved, skipping plot and saving")
-                    self.broken_signals_count += 1
-                    self.signals.broken_signals_count_updated.emit(self.broken_signals_count)
+                    self.broken_signala_count += 1
+                    self.signals.broken_signals_count_updated.emit(self.broken_signala_count)
                     continue
                 #put a condition to save the data inside file
                 if self.saving_number_of_signals != None:
                     if self.saved_signals_count < self.saving_number_of_signals:
-                        self.save_data(header, data)
+                        self.save_data(result)
                         self.saved_signals_count += 1
                         print(f"Saved {self.saved_signals_count} out of {self.saving_number_of_signals}")
                     else:
@@ -179,7 +165,7 @@ class Worker(QRunnable):
                 else:
                     self.saved_signals_count = 0
                     self.total_signals_count = 0
-                    self.broken_signals_count = 0
+                    self.broken_signala_count = 0
                     #self.saving_number_of_signals = None
                         
                 
@@ -188,7 +174,7 @@ class Worker(QRunnable):
                 exctype, value = sys.exc_info()[:2]
                 self.signals.error.emit((exctype, value, traceback.format_exc()))
             else:
-                self.signals.result.emit(data)
+                self.signals.result.emit(result)
             finally:
                 self.signals.finished.emit()
                 print("One loop complete!")
@@ -196,13 +182,15 @@ class Worker(QRunnable):
             # self.realtime_checked = self.func_is_button_checked(*self.args, **self.kwargs)
     
     
-    def save_data(self, header, data):
-        combined_df = pd.concat([header, data]).to_frame().transpose()
-        print("After transposing data shape", combined_df.shape)
+    def save_data(self, data):
+        df = pd.DataFrame(data)
+        print("Before transposing data shape", df.shape)
+        df = df.set_index('raw_adc').transpose()
+        print("After transposing data shape", df.shape)
         file_path = f"{self.dataFilePath}/signal_{self.saving_number_of_signals}.csv"
         if not os.path.exists(self.dataFilePath):
             os.makedirs(self.dataFilePath)
-        combined_df.to_csv(file_path, mode='a', index=False, header=False)
+        df.to_csv(file_path, mode='a', index=False)
         print(f"Data saved to {file_path}")
         
     def set_saving_number_of_signals(self, saving_number_of_signals):
@@ -427,7 +415,6 @@ class MainWindow(QMainWindow):
         self.raw_adc_data = y
 
         # Plot the data
-        print(f"X_axis DataLen:{len(x)}, Y_axis DataLen:{len(y)}")
         self.plot = self.plot_widget.plot(x, y)
         self.plot_widget.setBackground('black')
         print("Show region to select : ", self.range_selector.getRegion())
