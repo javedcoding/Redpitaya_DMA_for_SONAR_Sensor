@@ -679,6 +679,12 @@ void acquire_data(){
         }
     }
 
+    //Read data for getting time of flight of the signal
+    do{
+		usleep(500);
+		read(iic.fd, iic.buf, 3 );
+	}while( iic.buf[1]== 0xFF );
+
     time_of_flight_us = (float)( iic.buf[1]<<8 | iic.buf[2] ); // combining two bytes to form a single 16-bit value
     /* Stop the acquisition */
     rp_AcqStop();
